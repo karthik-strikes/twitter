@@ -1,4 +1,3 @@
-
 import twitter
 import sys 
 import time
@@ -68,6 +67,8 @@ class errorHandlers:
             return wait_period
         else:
             raise e
+
+#--------------< Class for all the twitter API calls >-----------------
 class twitter_data:
     
     #--------------< Constructor to set the twitter_api >-----------------
@@ -119,7 +120,8 @@ class twitter_data:
 
         # Do something useful with the IDs, like store them to disk...
         return friends_ids[:friends_limit], followers_ids[:followers_limit]
-    
+
+    #--------------< Sending the callable functions and its arguments as the argument and reference >-----------------
     def make_twitter_request(self,twitter_api_func,max_errors=10,*args, **kw):
         wait_period = 2
         error_count =0
@@ -147,13 +149,172 @@ class twitter_data:
                     print >> sys.stderr, 'Too many consecutive errors...bailing out.'
                     raise
     
+    #--------------< get the user Profile information >-----------------
+    def get_user_profile(self, screen_names=None, user_ids=None):
+        # Must have either screen_name or user_id (logical xor)
+        assert (screen_names != None) != (user_ids != None),     "Must have screen_names or user_ids, but not both"
+        items_to_info = {}
+        items = screen_names or user_ids
+        while len(items) > 0:
+
+            # Process 100 items at a time per the API specifications for /users/lookup.
+            # See http://bit.ly/2Gcjfzr for details.
+
+            items_str = ','.join([str(item) for item in items[:100]])
+            items = items[100:]
+
+            if screen_names:
+                response = self.make_twitter_request(self.twitter_api.users.lookup, 
+                                                screen_name=items_str)
+            else: # user_ids
+                response = self.make_twitter_request(self.twitter_api.users.lookup, 
+                                                user_id=items_str)
+            for user_info in response:
+                if screen_names:
+                    items_to_info[user_info['screen_name']] = user_info
+                else: # user_ids
+                    items_to_info[user_info['id']] = user_info
+        return items_to_info
+    """
+    #--------------< get the top_n followers based on followers_count >-----------------
+    def get_top_followers(self, all_followers, top_n):
+        top_followers = {}
+        for follower in all_followers:
+            followers_info = self.get_user_profile(user_ids = [follower])
+            top_followers.update({followers_info[follower]["id"] : followers_info[follower]["followers_count"]})
+        if(len(top_followers) >= top_n):
+            min_value = sorted(top_followers.values(), reverse=True)[top_n-1]
+        elif(len(top_followers) > 1):
+            min_value = sorted(top_followers.values(), reverse=True)[len(top_followers)-1]
+        else:
+            min_value = 0
+        top_followers = {key:value for key,value in top_followers.items() if value >= min_value}
+        return top_followers
+    """
+    def get_top_followers(self, all_followers, top_n):
+        top_followers = {}
+        for follower in all_followers:
+            followers_info = self.get_user_profile(user_ids=[follower])
+            if followers_info:
+                follower_id = followers_info[follower].get("id")
+                follower_followers_count = followers_info[follower].get("followers_count")
+                if follower_id and follower_followers_count:
+                    top_followers[follower_id] = follower_followers_count
+
+        if not top_followers:
+            return {}
+
+        sorted_followers = sorted(top_followers.items(), key=lambda x: x[1], reverse=True)
+        min_value = sorted_followers[min(len(sorted_followers) - 1, top_n - 1)][1]
+        return {follower_id: follower_followers_count for follower_id, follower_followers_count in sorted_followers if follower_followers_count >= min_value}
+
+    def get_top_n_reciprocal_friends(self, id, top_n=5):
+        friends_ids, followers_ids = self.get_friends_followers_ids(
+            user_id=id, friends_limit=50, followers_limit=50)
+
+        reciprocal_friends = set(friends_ids).intersection(set(followers_ids))
+        if not reciprocal_friends:
+            return {}
+
+        return self.get_top_followers(reciprocal_friends, top_n)
+
+
+    #--------------< crawl the top_n followers to get their top_n followers>-----------------
+    def crawl_followers(self, screen_name, minimum_limit=1000, depth=2):
+        userInfo = self.make_twitter_request(self.twitter_api.users.show, screen_name=screen_name)
+        id = userInfo['id']
+        #id = self.twitter_api.users.show(screen_name=screen_name)['id']
+        connection_dictionary = {}
+        connection_graph_list = []
+        unique_friends = []
+        next_queue = self.get_top_n_reciprocal_friends(id)
+        connection_dictionary.update({id : list(next_queue)})
+        connection_graph_list.append(id)
+        connection_graph_list.extend(list(next_queue.keys())) 
+        self.graph_obj.add_a_node(id)
+        self.graph_obj.add_node(list(next_queue.keys()))
+        for n in list(next_queue.keys()):
+            self.graph_obj.add_a_edge((id,n))
+        d = 1
+        next_queue_list = list(next_queue.keys())
+        while len(connection_graph_list) < minimum_limit :
+            print("Size of the graph is : ", len(connection_graph_list))
+            d += 1
+            (queue, next_queue_list) = (list(set(next_queue_list)), [])
+            for fid in queue:
+                top_n_reciprocal_friends = self.get_top_n_reciprocal_friends(fid)
+                unique_friends = list(set(top_n_reciprocal_friends) - set(connection_graph_list))
+                connection_graph_list += unique_friends
+                #adding new nodes to graph
+                self.graph_obj.add_node(unique_friends)
+                for n in top_n_reciprocal_friends:
+                    self.graph_obj.add_a_edge((fid,n))
+                connection_dictionary.update({fid : unique_friends})
+                next_queue_list +=  unique_friends
+                if(len(connection_dictionary) > minimum_limit):
+                    return connection_dictionary
+        return connection_dictionary
+
+    #--------------< creating the graph_class object >-----------------
+    def create_a_graph_obj(self):
+        graph_obj  = graph_class()
+        self.graph_obj = graph_obj
+
+    #--------------< Display the graph output >-----------------
+    def show_graph(self):
+        self.graph_obj.display_graph()
+
+
+#--------------< Graph Class for all the graph related API calls >-----------------
+class graph_class:
+    
+    #--------------< Constructor of the class to define the sn = social network graph >-----------------
+    def __init__(self):
+        self.sn_graph = netx.Graph()
+
+    #--------------< Add nodes from a list to the existing graph >-----------------
+    def add_node(self, node_list):
+        self.sn_graph.add_nodes_from(node_list)
+
+    #--------------< Add a node to the existing graph >-----------------
+    def add_a_node(self, node):
+        self.sn_graph.add_node(node)
+
+    #--------------< Add edges from a list to the existing graph >-----------------
+    def add_edge(self, edge_list):
+        self.sn_graph.add_edges_from(edge_list)
+
+    #--------------< Add a edge to the existing graph >-----------------
+    def add_a_edge(self, edge):
+        self.sn_graph.add_edge(*edge)
+
+    #--------------< Display the graph information on the console >-----------------
+    def display_graph(self):
+        file = open("FinalOutputFile.txt","w") 
+
+        file.write("\nSize of Network in terms of Nodes : " + str(self.sn_graph.number_of_nodes())) 
+        print("Network size interms of nodes : ", self.sn_graph.number_of_nodes())
+
+        file.write("\nSize of Network in terms of Edges : : " + str(self.sn_graph.number_of_edges()))
+        print("Network size interms of edges : : ",self.sn_graph.number_of_edges())
+
+        file.write("\nSize of Network in terms of Diameter : " + str(netx.diameter(self.sn_graph, e=None, usebounds=False)))
+        print("Network size interms of Diameter : " , netx.diameter(self.sn_graph, e=None, usebounds=False))
+
+        file.write("\nSize of Network in terms of Average distance : " +  str(netx.average_shortest_path_length(self.sn_graph, weight=None)))
+        print("Network size interms of Average distance : " , netx.average_shortest_path_length(self.sn_graph, weight=None))
+
+        file.close() 
+        netx.draw(self.sn_graph, with_labels=True, node_color='orange', edge_color='blue')
+        plot.savefig('OutputGraphView.png', bbox_inches=0, orientation='landscape', pad_inches=1)
+        plot.show()
 
 def main():
     try:
         print("Showing First Requirement : ")
         print("-------------------------------------------------------------------")
         print("Using self username on Twitter")
-        screen_name="mourya1028"
+        screen_name="KarthikKosuri7"
         print("UserName selected : " , screen_name)
 
         authorization = Authorization();
@@ -171,6 +332,32 @@ def main():
         print(followers_ids)
     
         print("\n\nShowing Third Requirement : ")
+        print("-------------------------------------------------------------------")
+        print("Fetching Reciprocal Friends of the user")
+        print("Selected Reciprocal Friends list :")
+        reciprocal_friends = set(friends_ids) & set(followers_ids)
+        print(reciprocal_friends)
+
+        
+        print("\n\nShowing Fourth Requirement : ")
+        print("-------------------------------------------------------------------")
+        print("Fetching top 5 Reciprocal Friends of the user")
+        print("Selected Top 5 Friends list :")
+        print(twitterObj.get_top_followers(reciprocal_friends , top_n = 5))
+
+        
+        print("\n\nShowing Fifth Requirement : ")
+        print("-------------------------------------------------------------------")
+        print("Moving to the friends of user who are at 'distance-1', 'distance-2' etc form a network")
+        twitterObj.create_a_graph_obj()
+        twitterObj.crawl_followers(screen_name = screen_name, minimum_limit=100, depth = 10)
+
+
+        print("\n\nShowing Sixth and Seventh Requirement : ")
+        print("-------------------------------------------------------------------")
+        print("Creating a social network based on the results from Req 5")
+        twitterObj.show_graph()
+
     except twitter.api.TwitterHTTPError as e:
         print("Error occured while running the program. Please run again after sometime")
 
